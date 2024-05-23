@@ -2,4 +2,4 @@ faiss-cpu
 transformers
 numpy
 fastapi
-uvircorn
+langchain
