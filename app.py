@@ -1,7 +1,8 @@
 import streamlit as st
 import requests
-import faiss
-import numpy as np
+from langchain.chains import RAGChain
+from langchain.llms import HuggingFaceLLM
+from langchain.retrievers import HuggingFaceRetriever
 from transformers import (
     DPRContextEncoder, 
     DPRContextEncoderTokenizer, 
@@ -11,10 +12,8 @@ from transformers import (
     AutoModelForCausalLM
 )
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from threading import Thread
-import uvicorn
+from fastapi.testclient import TestClient
 
 # FastAPI setup
 app = FastAPI()
@@ -46,32 +45,24 @@ question_tokenizer = DPRQuestionEncoderTokenizer.from_pretrained('facebook/dpr-q
 llm_tokenizer = AutoTokenizer.from_pretrained("google/gemma-2b")
 llm_model = AutoModelForCausalLM.from_pretrained("google/gemma-2b")
 
-def retrieve_documents(query, top_k=5):
-    inputs = question_tokenizer(query, return_tensors='pt', padding=True, truncation=True)
-    query_embedding = question_encoder(**inputs).pooler_output.detach().numpy()
-    distances, indices = index.search(query_embedding, top_k)
-    return [document_texts[i] for i in indices[0]]
+# LangChain setup
+llm = HuggingFaceLLM(model_name="google/gemma-2b")
+retriever = HuggingFaceRetriever(
+    question_encoder=question_encoder,
+    question_tokenizer=question_tokenizer,
+    context_encoder=context_encoder,
+    context_tokenizer=context_tokenizer,
+    documents=[{"id": str(i), "text": text} for i, text in enumerate(document_texts)]
+)
 
-def generate_response(query):
-    relevant_docs = retrieve_documents(query)
-    context = " ".join(relevant_docs)
-    inputs = llm_tokenizer.encode(query + " " + context, return_tensors='pt')
-    outputs = llm_model.generate(**inputs, max_length=500)
-    response = llm_tokenizer.decode(outputs[0], skip_special_tokens=True)
-    return response
+rag_chain = RAGChain(llm=llm, retriever=retriever)
 
 @app.post("/chat")
 async def chat(query: QueryModel):
-    response = generate_response(query.query)
+    response = rag_chain(query.query)
     return {"response": response}
 
-def run_fastapi():
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
-# Start FastAPI in a separate thread
-thread = Thread(target=run_fastapi)
-thread.daemon = True
-thread.start()
+client = TestClient(app)
 
 # Streamlit setup
 st.title("RAG Chatbot with GEMMA and Streamlit")
@@ -82,11 +73,7 @@ user_input = st.text_input("Your question:")
 if st.button("Get Response"):
     if user_input:
         try:
-            response = requests.post(
-                "http://localhost:8000/chat",
-                json={"query": user_input},
-                timeout=30  # Set a higher timeout
-            )
+            response = client.post("/chat", json={"query": user_input})
             if response.status_code == 200:
                 st.write(response.json()["response"])
             else:
